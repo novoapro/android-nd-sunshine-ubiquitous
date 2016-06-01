@@ -29,13 +29,25 @@ import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
+import android.support.annotation.NonNull;
 import android.support.wearable.watchface.CanvasWatchFaceService;
 import android.support.wearable.watchface.WatchFaceService;
 import android.support.wearable.watchface.WatchFaceStyle;
+import android.util.Log;
 import android.view.SurfaceHolder;
 
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.common.api.PendingResult;
+import com.google.android.gms.common.api.ResultCallback;
 import com.google.android.gms.wearable.DataApi;
+import com.google.android.gms.wearable.DataEvent;
 import com.google.android.gms.wearable.DataEventBuffer;
+import com.google.android.gms.wearable.DataItem;
+import com.google.android.gms.wearable.DataItemBuffer;
+import com.google.android.gms.wearable.DataMap;
+import com.google.android.gms.wearable.DataMapItem;
+import com.google.android.gms.wearable.Wearable;
 
 import java.lang.ref.WeakReference;
 import java.util.Calendar;
@@ -66,7 +78,8 @@ public class SunshineAnalogFaceService extends CanvasWatchFaceService {
         return new Engine();
     }
 
-    private static class EngineHandler extends Handler implements DataApi.DataListener {
+
+    private static class EngineHandler extends Handler {
         private final WeakReference<SunshineAnalogFaceService.Engine> mWeakReference;
 
         EngineHandler(SunshineAnalogFaceService.Engine reference) {
@@ -84,17 +97,12 @@ public class SunshineAnalogFaceService extends CanvasWatchFaceService {
                 }
             }
         }
-
-        @Override
-        public void onDataChanged(DataEventBuffer dataEventBuffer) {
-            SunshineAnalogFaceService.Engine engine = mWeakReference.get();
-            if(engine != null){
-                engine.handleWeatherUpdate(1, 35, 45);
-            }
-        }
     }
 
-    private class Engine extends CanvasWatchFaceService.Engine {
+    private class Engine extends CanvasWatchFaceService.Engine implements DataApi.DataListener,
+            GoogleApiClient.ConnectionCallbacks, GoogleApiClient.OnConnectionFailedListener {
+        private static final String TAG = "Engine";
+
         private static final float HOUR_STROKE_WIDTH = 5f;
         private static final float MINUTE_STROKE_WIDTH = 3f;
         private static final float SECOND_TICK_STROKE_WIDTH = 2f;
@@ -102,10 +110,24 @@ public class SunshineAnalogFaceService extends CanvasWatchFaceService {
         private static final float CENTER_GAP_AND_CIRCLE_RADIUS = 4f;
 
         private static final int SHADOW_RADIUS = 2;
+
+        private static final String MAX_TEMP_KEY = "weather_max_temp";
+        private static final String MIN_TEMP_KEY = "weather_min_temp";
+        private static final String WEATHER_ID_KEY = "weather_id";
+
         private final Rect mPeekCardBounds = new Rect();
+
         /* Handler to update the time once a second in interactive mode. */
         private final Handler mUpdateTimeHandler = new EngineHandler(this);
+
         private Calendar mCalendar;
+
+        private GoogleApiClient mApiClient = new GoogleApiClient.Builder(SunshineAnalogFaceService.this)
+                .addConnectionCallbacks(this)
+                .addOnConnectionFailedListener(this)
+                .addApi(Wearable.API)
+                .build();
+
         private final BroadcastReceiver mTimeZoneReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
@@ -113,6 +135,7 @@ public class SunshineAnalogFaceService extends CanvasWatchFaceService {
                 invalidate();
             }
         };
+
         private boolean mRegisteredTimeZoneReceiver = false;
         private boolean mMuteMode;
         private float mCenterX;
@@ -125,6 +148,7 @@ public class SunshineAnalogFaceService extends CanvasWatchFaceService {
         private int mWatchHandHighlightColor;
         private int mWatchHandShadowColor;
         private int mWatchFaceBg;
+
         private Paint mHourPaint;
         private Paint mMinutePaint;
         private Paint mSecondPaint;
@@ -201,13 +225,10 @@ public class SunshineAnalogFaceService extends CanvasWatchFaceService {
             mWatchHandColor = Color.WHITE;
             mWatchHandShadowColor = Color.BLACK;
 
-            if(BuildConfig.DEBUG) {
-                mMaxTemp = 79;
-                mMinTemp = 68;
-                mWeatherArt = BitmapFactory.decodeResource(getResources(), R.drawable.art_clear);
-            }
-
             mCalendar = Calendar.getInstance();
+
+            mMaxTemp = 500;
+            mMinTemp = 500;
         }
 
         @Override
@@ -215,7 +236,7 @@ public class SunshineAnalogFaceService extends CanvasWatchFaceService {
             mUpdateTimeHandler.removeMessages(MSG_UPDATE_TIME);
             super.onDestroy();
 
-            if(mWeatherArt != null)
+            if (mWeatherArt != null)
                 mWeatherArt.recycle();
         }
 
@@ -235,6 +256,13 @@ public class SunshineAnalogFaceService extends CanvasWatchFaceService {
             super.onAmbientModeChanged(inAmbientMode);
             mAmbient = inAmbientMode;
 
+            if(!mAmbient){
+                mApiClient.connect();
+            }else{
+                Wearable.DataApi.removeListener(mApiClient, this);
+                if(mApiClient.isConnected())
+                    mApiClient.disconnect();
+            }
             updateWatchHandStyle();
             /* Check and trigger whether or not timer should be running (only in active mode). */
             updateTimer();
@@ -279,7 +307,9 @@ public class SunshineAnalogFaceService extends CanvasWatchFaceService {
                 canvas.drawColor(mWatchFaceBg);
                 if (mWeatherArt != null && !mWeatherArt.isRecycled())
                     canvas.drawBitmap(mWeatherArt, bounds.centerX() - (mWeatherArt.getWidth() / 2), bounds.centerY() - (mWeatherArt.getHeight() / 2), null);
+            }
 
+            if(this.mMaxTemp != 500 && this.mMinTemp != 500) {
                 canvas.drawText(String.format(Locale.US, "%s°", this.mMaxTemp),
                         bounds.width() - 30, bounds.centerY() - 5,
                         mMaxTempPaint);
@@ -465,10 +495,105 @@ public class SunshineAnalogFaceService extends CanvasWatchFaceService {
             }
         }
 
+        @Override
+        public void onDataChanged(DataEventBuffer dataEventBuffer) {
+            for (DataEvent event : dataEventBuffer) {
+                if (event.getType() == DataEvent.TYPE_CHANGED) {
+                    // DataItem changed
+                    DataItem item = event.getDataItem();
+                    if (item.getUri().getPath().compareTo("/weather") == 0) {
+                        handleDataItem(item);
+                    }
+                }
+            }
+        }
+
         private void handleWeatherUpdate(int iconResource, int maxTemp, int minTemp) {
             this.mWeatherArt = BitmapFactory.decodeResource(getResources(), iconResource);
             this.mMaxTemp = maxTemp;
             this.mMinTemp = minTemp;
         }
+
+        @Override
+        public void onConnected(Bundle connectionHint) {
+            if (Log.isLoggable(TAG, Log.DEBUG)) {
+                Log.d(TAG, "onConnected: " + connectionHint);
+            }
+
+            checkLatestUpdate();
+
+            Wearable.DataApi.addListener(mApiClient, this);
+        }
+
+        private void checkLatestUpdate() {
+            PendingResult<DataItemBuffer> results = Wearable.DataApi.getDataItems(mApiClient);
+            results.setResultCallback(new ResultCallback<DataItemBuffer>() {
+                @Override
+                public void onResult(@NonNull DataItemBuffer dataItems) {
+                    for(DataItem item : dataItems){
+                        if(item.getUri().getPath().compareTo("/weather") == 0){
+                            handleDataItem(item);
+                        }
+                    }
+                    dataItems.release();
+                }
+            });
+        }
+
+        private void handleDataItem(DataItem item) {
+            DataMap dataMap = DataMapItem.fromDataItem(item).getDataMap();
+            mMaxTemp = dataMap.getInt(MAX_TEMP_KEY, 500);
+            mMinTemp = dataMap.getInt(MIN_TEMP_KEY, 500);
+
+            int weatherId = dataMap.getInt(WEATHER_ID_KEY);
+
+            handleWeatherUpdate(
+                    getArtResourceForWeatherCondition(weatherId),
+                    mMaxTemp,
+                    mMinTemp
+            );
+        }
+
+        @Override
+        public void onConnectionSuspended(int cause) {
+            if (Log.isLoggable(TAG, Log.DEBUG)) {
+                Log.d(TAG, "onConnectionSuspended: " + cause);
+            }
+        }
+
+        @Override
+        public void onConnectionFailed(@NonNull ConnectionResult result) {
+            if (Log.isLoggable(TAG, Log.DEBUG)) {
+                Log.d(TAG, "onConnectionFailed: " + result);
+            }
+        }
+
+        int getArtResourceForWeatherCondition(int weatherId) {
+            if (weatherId >= 200 && weatherId <= 232) {
+                return R.drawable.art_storm;
+            } else if (weatherId >= 300 && weatherId <= 321) {
+                return R.drawable.art_light_rain;
+            } else if (weatherId >= 500 && weatherId <= 504) {
+                return R.drawable.art_rain;
+            } else if (weatherId == 511) {
+                return R.drawable.art_snow;
+            } else if (weatherId >= 520 && weatherId <= 531) {
+                return R.drawable.art_rain;
+            } else if (weatherId >= 600 && weatherId <= 622) {
+                return R.drawable.art_snow;
+            } else if (weatherId >= 701 && weatherId <= 761) {
+                return R.drawable.art_fog;
+            } else if (weatherId == 761 || weatherId == 781) {
+                return R.drawable.art_storm;
+            } else if (weatherId == 800) {
+                return R.drawable.art_clear;
+            } else if (weatherId == 801) {
+                return R.drawable.art_light_clouds;
+            } else if (weatherId >= 802 && weatherId <= 804) {
+                return R.drawable.art_clouds;
+            }
+            return -1;
+        }
+
     }
 }
